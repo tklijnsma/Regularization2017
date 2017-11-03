@@ -13,6 +13,7 @@ from glob import glob
 
 from time import strftime
 datestr = strftime( '%b%d' )
+datestr_detailed = strftime( '%y%m%d_%H%M%S' )
 
 import ROOT
 
@@ -41,7 +42,7 @@ def SetCMargins(
     c.SetBottomMargin( BottomMargin )
     c.SetTopMargin( TopMargin )
 
-PLOTDIR = 'plots_{0}'.format(datestr)
+PLOTDIR = abspath( 'plots_{0}'.format(datestr) )
 def SetPlotDir( newdir ):
     global PLOTDIR
     PLOTDIR = newdir
@@ -108,7 +109,7 @@ def GetDefaultJobDir():
     return DEFAULTJOBDIR
 
 
-def executeCommand( cmd, captureOutput=False ):
+def executeCommand( cmd, verbose=True, captureOutput=False, onBatch=False, sendEmail=False ):
     if not isinstance( cmd, basestring ):
         cmdStr = '\n    '.join( cmd )
         cmdExec = ' '.join(cmd)
@@ -116,18 +117,72 @@ def executeCommand( cmd, captureOutput=False ):
         cmdStr = cmd
         cmdExec = cmd
 
-    if TESTMODE:
-        print '\nTESTMODE: ' + cmdStr + '\n'
-    else:
-        if not captureOutput:
-            print '\nEXECUTING: ' + cmdStr + '\n'
-            os.system( cmdExec )
+    if not onBatch:
+        if TESTMODE:
+            if verbose: print '\nTESTMODE: ' + cmdStr + '\n'
         else:
-            output = subprocess.check_output(
-                cmd,
-                shell=True,
+            if not captureOutput:
+                if verbose: print '\nEXECUTING: ' + cmdStr + '\n'
+                os.system( cmdExec )
+            else:
+                output = subprocess.check_output(
+                    cmd,
+                    shell=True,
+                    )
+                return output
+
+    else:
+
+        cwd    = abspath(os.getcwd())
+        cmsswd = abspath(join( os.environ['CMSSW_BASE'], 'src' ))
+
+        sh = []
+        if sendEmail:
+            sh.extend([
+                '#$ -M tklijnsm@gmail.com',
+                '#$ -m eas',
+                ])
+        sh.extend([
+            '#$ -o {0}'.format(cwd),
+            '#$ -e {0}'.format(cwd),
+            'export VO_CMS_SW_DIR=/cvmfs/cms.cern.ch/',
+            'source /cvmfs/cms.cern.ch/cmsset_default.sh',
+            'source /swshare/psit3/etc/profile.d/cms_ui_env.sh',
+            'cd {0}'.format( cmsswd ),
+            'eval `scramv1 runtime -sh`',
+            'cd {0}'.format( cwd ),
+            cmdExec
+            ])
+
+
+        if TESTMODE:
+            print '\nTESTMODE + BATCHMODE:'
+            print '\n'.join(sh)
+            print
+
+        else:
+
+            osHandle, shFile =  tempfile.mkstemp(
+                prefix = 'job_{0}_'.format(datestr_detailed),
+                suffix = '.sh',
+                dir = cwd
                 )
-            return output
+            shFile = abspath( shFile )
+
+            with open( shFile, 'w' ) as shFp:
+                shFp.write( '\n'.join(sh) )
+
+            qsub_cmd = 'qsub -q short.q {0}'.format( shFile )
+
+            print '\nEXECUTING:'
+            print '  Created .sh file: {0}'.format(shFile)
+            print '  With following contents:'
+            print '    ' + '\n    '.join(sh)
+            print '  Submitting: {0}'.format( qsub_cmd )
+
+            executeCommand( qsub_cmd, verbose=False )
+
+
 
 
 class AnalysisError(Exception):
@@ -402,7 +457,11 @@ def ListSet(
     elif isinstance( datacardRootFile, ROOT.RooWorkspace ):
         w = datacardRootFile
 
-    argset = w.set(setName)
+    try:
+        argset = w.set(setName)
+    except AttributeError:
+        ThrowError( 'No workspace \'w\' found in {0}'.format(datacardRootFile) )
+
     if not argset:
         print 'No set \'{0}\' in {1}'.format( setName, datacardRootFile )
         datacardFp.Close()
@@ -486,6 +545,7 @@ def ConvertTChainToArray(
     if verbose: 'Looking for at least one filled root file to obtain the variable list from...'
     foundTree = False
     for rootFile in rootFileList:
+        if not isfile(rootFile): continue
 
         rootFp = ROOT.TFile.Open( rootFile )
         allKeys = rootFp.GetListOfKeys()
@@ -500,7 +560,7 @@ def ConvertTChainToArray(
             if verbose: print '    Found tree in {0}'.format( rootFile )
             break
     else:
-        ThrowError( 'Not a single root file had a tree called \'{0}\'; Cannot extract any data', throwException=True )
+        ThrowError( 'Not a single root file had a tree called \'{0}\'; Cannot extract any data'.format(treeName) )
 
 
     # Get the variable list from this one file
